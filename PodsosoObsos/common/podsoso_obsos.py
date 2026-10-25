@@ -47,6 +47,7 @@ from common import (
     log_err,
     log_info,
     log_step,
+    clear_screen,
     Gate,
     MultiGate,
     CLI_GATE,
@@ -515,11 +516,8 @@ def main_menu():
         agy_path = platform.find_agy_path()
         mgr_path = platform.find_manager_path()
 
-        # Очистка экрана
-        if sys.platform == "win32":
-            os.system("cls")
-        else:
-            print("\033[2J\033[H", end="")
+        # Очистка экрана (включая скроллбэк) и отрисовка меню заново
+        clear_screen()
 
         print_banner()
 

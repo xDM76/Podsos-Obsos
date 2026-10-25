@@ -55,6 +55,30 @@ def log_step(title, success=True, detail=""):
     detail_str = f" ({color(detail, C_DIM)})" if detail else ""
     print(f"   [{mark}] {title}{detail_str}")
 
+def clear_screen():
+    """Очистка экрана перед отрисовкой меню.
+    ANSI-терминал: стереть экран И скроллбэк, курсор в начало — предыдущие
+    экраны не остаются в истории прокрутки. Не-ANSI консоль или пайп:
+    прокрутка на высоту терминала пустыми строками (лучшее из возможного)."""
+    if os.name == "nt" or sys.platform == "win32":
+        os.system("cls")
+        return
+    try:
+        is_tty = sys.stdout.isatty()
+    except Exception:
+        is_tty = False
+    term = os.environ.get("TERM", "")
+    if is_tty and term and term != "dumb":
+        sys.stdout.write("\033[2J\033[3J\033[H")
+        sys.stdout.flush()
+    else:
+        try:
+            lines = shutil.get_terminal_size(fallback=(24, 80)).lines
+        except Exception:
+            lines = 24
+        sys.stdout.write("\n" * max(1, lines - 1))
+        sys.stdout.flush()
+
 # =============================================================================
 # БАЗОВЫЙ КЛАСС ПЛАТФОРМЫ (BasePlatform)
 # =============================================================================
@@ -327,10 +351,15 @@ def apply_binary_patch(path, gate_obj, name="Binary", platform=None):
 
     # 3. Поиск гейтов
     applied = 0
+    already = 0
     try:
         matches = gate_obj.resolve_all(bytes(data))
         for kind, offsets, g in matches:
             for off in offsets:
+                if kind == "patched":
+                    already += 1
+                    log_step(f"Гейт уже пропатчен: {g.desc} @ 0x{off:x}", True, "изменений не требуется")
+                    continue
                 data[off:off + len(g.fix)] = g.fix
                 applied += 1
                 log_step(f"Гейт: {g.desc} @ 0x{off:x}", True)
@@ -344,12 +373,15 @@ def apply_binary_patch(path, gate_obj, name="Binary", platform=None):
         else:
             if b"inexigible" in data:
                 log_step("Бинарник уже пропатчен (строка inexigible найдена)", True)
-                applied = 1
+                already = 1
             else:
                 log_err("Не найдена ни машинная сигнатура, ни строка ineligible.")
                 return False
 
     if applied == 0:
+        if already > 0:
+            log_ok(f"{name} уже был пропатчен ранее — перезапись не требуется.")
+            return True
         log_warn("Патч уже применён или совпадений не обнаружено.")
 
     # 4. Запись через платформенный адаптер
