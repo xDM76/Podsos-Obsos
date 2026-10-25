@@ -616,9 +616,9 @@ def main_menu():
             p_agy = platform.find_agy_path()
             p_mgr = platform.find_manager_path()
             if p_agy:
-                restore_binary(p_agy, "agy CLI", platform)
+                restore_binary(p_agy, CLI_GATE, "agy CLI", platform)
             if p_mgr:
-                restore_binary(p_mgr, "Antigravity 2.0", platform)
+                restore_binary(p_mgr, MANAGER_GATE, "Antigravity 2.0", platform)
             input(color("\nНажмите Enter для возврата в меню...", C_DIM))
         elif choice == "7":
             print(f"\n--- Очистка {platform.get_hosts_path()} ---")

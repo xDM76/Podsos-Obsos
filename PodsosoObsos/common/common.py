@@ -140,12 +140,15 @@ class BasePlatform:
 # =============================================================================
 
 class Gate:
-    def __init__(self, sig, patched, fix, offset=0, desc=""):
+    def __init__(self, sig, patched, fix, offset=0, desc="", orig=None):
         self.sig = re.compile(sig, re.S)
         self.patched = re.compile(patched, re.S)
         self.fix = fix
         self.offset = offset
         self.desc = desc
+        # Байты оригинала в зоне fix (до-патчные). Заполняются ТОЛЬКО когда
+        # они полностью конкретны в сигнатуре — такой гейт обратим байтово-точно.
+        self.orig = orig
 
     def find(self, data):
         patched_offsets = [m.start() + self.offset for m in self.patched.finditer(data)]
@@ -194,6 +197,7 @@ CLI_GATE_X64 = Gate(
     b"\x48\x85\xc0\x90",
     offset=9,
     desc="eligibility screen off (x64)",
+    orig=b"\x80\x78\x08\x00",
 )
 CLI_GATE_ARM64 = Gate(
     rb"...\xb5...\xb4\x01\x20\x40\x39[\x01\x21\x41\x61\x81\xa1\xc1\xe1].[\x00-\x07]\x37"
@@ -205,6 +209,7 @@ CLI_GATE_ARM64 = Gate(
     b"\x21\x00\x80\x52",
     offset=8,
     desc="eligibility screen off (arm64 v1)",
+    orig=b"\x01\x20\x40\x39",
 )
 CLI_GATE_ARM64_V2 = Gate(
     rb"\x01\x24\x40\x39...\x36\x01\x20\x40\x39...\x37",
@@ -212,6 +217,7 @@ CLI_GATE_ARM64_V2 = Gate(
     b"\x21\x00\x80\x52",
     offset=8,
     desc="eligibility screen off (arm64 v2)",
+    orig=b"\x01\x20\x40\x39",
 )
 CLI_GATE_ARM64_W4 = Gate(
     rb"[\x00\x20\x40\x60\x80\xa0\xc0\xe0]..\xb4\x04\x20\x40\x39"
@@ -221,6 +227,7 @@ CLI_GATE_ARM64_W4 = Gate(
     b"\x24\x00\x80\x52",
     offset=4,
     desc="eligibility screen off (arm64 w4)",
+    orig=b"\x04\x20\x40\x39",
 )
 CLI_GATE_ARM64_W2 = Gate(
     rb"[\x01\x21\x41\x61\x81\xa1\xc1\xe1]..\xb5[\x00\x20\x40\x60\x80\xa0\xc0\xe0]..\xb4"
@@ -230,6 +237,7 @@ CLI_GATE_ARM64_W2 = Gate(
     b"\x22\x00\x80\x52",
     offset=8,
     desc="eligibility screen off (arm64 w2)",
+    orig=b"\x02\x20\x40\x39",
 )
 
 CLI_GATE = MultiGate(
@@ -298,6 +306,37 @@ def get_binary_status(path, gate_obj):
         return ("error", None)
     return _binary_status_from_data(data, gate_obj)
 
+def _iter_gates(gate_obj):
+    if isinstance(gate_obj, MultiGate):
+        return list(gate_obj.gates)
+    return [gate_obj]
+
+def revert_patches_inplace(data, gate_obj):
+    """Откат патчей прямо в данных (версия бинарника гарантированно сохраняется):
+    1) строковый патч: inexigible -> ineligible (всегда обратим);
+    2) машинные гейты с известным orig: fix-байты -> оригинальные (байтово-точно).
+    Гейты без orig (wildcard-байты в зоне fix) откатить точно невозможно — фиксируется в notes.
+    Возвращает (новые_данные, число_откаченных_правок, список_пояснений)."""
+    out = bytearray(data)
+    reverted = 0
+    notes = []
+    in_cnt = out.count(b"inexigible")
+    if in_cnt:
+        out = bytearray(bytes(out).replace(b"inexigible", b"ineligible"))
+        reverted += in_cnt
+        notes.append(f"строковый патч снят: inexigible -> ineligible ({in_cnt} вхожд.)")
+    for g in _iter_gates(gate_obj):
+        if not g.orig:
+            if g.patched.search(bytes(out)):
+                notes.append(f"гейт «{g.desc}»: точные байты оригинала неизвестны — оставлен пропатченным")
+            continue
+        for m in g.patched.finditer(bytes(out)):
+            off = m.start() + g.offset
+            out[off:off + len(g.orig)] = g.orig
+            reverted += 1
+            notes.append(f"гейт «{g.desc}» @ 0x{off:x} восстановлен (fix -> оригинал)")
+    return bytes(out), reverted, notes
+
 def apply_binary_patch(path, gate_obj, name="Binary", platform=None):
     if not path or not os.path.isfile(path):
         log_err(f"Файл {name} не найден: {path}")
@@ -315,39 +354,58 @@ def apply_binary_patch(path, gate_obj, name="Binary", platform=None):
         log_err(f"Не удалось прочитать {path}: {e}")
         return False
 
-    # 2. Бэкап ДО-патчной версии (обязателен перед любой записью)
-    # Если бэкап уже есть, но отличается от текущего файла — бинарник
-    # обновился с прошлого патча. Обновляем бэкап только если текущий
-    # файл в до-патчном (оригинальном) состоянии, иначе затрём pristine-
-    # оригинал уже пропатченным содержимым и откат станет невозможен.
+    # 2. Бэкап ДО-патчной версии (обязателен перед любой записью).
+    # Маркер «та же версия»: revert_patches_inplace(текущего) == бэкапу —
+    # откат патчей восстанавливает в точности оригинал этого билда
+    # (для CLI-гейтов байтово-точно). Размер как маркер НЕ годится:
+    # на macOS codesign меняет размер подписи, а соседние билды бывают
+    # почти равны по размеру.
     bak = path + BAK_EXT
     current = bytes(data)
+    cur_state, _ = _binary_status_from_data(current, gate_obj)
+    bak_data = None
     if os.path.exists(bak):
         try:
             with open(bak, "rb") as f:
                 bak_data = f.read()
         except Exception:
             bak_data = None
-        if bak_data is not None and bak_data != current:
-            cur_state, _ = _binary_status_from_data(current, gate_obj)
-            if cur_state in ("unpatched", "unpatched_string"):
-                try:
-                    with open(bak, "wb") as f:
-                        f.write(current)
-                    log_ok(f"Обнаружена новая версия бинарника — бэкап обновлён на до-патчную: {os.path.basename(bak)}")
-                except Exception as e:
-                    log_warn(f"Не удалось обновить бэкап {bak}: {e}")
-            elif cur_state in ("patched", "patched_string"):
-                log_info(f"Текущий файл уже пропатчен и отличается от бэкапа — бэкап хранит оригинал, не трогаем.")
-            else:
-                log_warn(f"Содержимое бинарника отличается от бэкапа, состояние не определено — бэкап оставлен как есть.")
-    else:
+
+    def _write_bak(payload: bytes, reason: str) -> None:
         try:
             with open(bak, "wb") as f:
-                f.write(current)
-            log_ok(f"Создан бэкап версии до патча: {os.path.basename(bak)}")
+                f.write(payload)
+            log_ok(f"Бэкап: {reason} ({os.path.basename(bak)})")
         except Exception as e:
-            log_warn(f"Не удалось создать бэкап {bak}: {e}")
+            log_warn(f"Не удалось обновить бэкап {bak}: {e}")
+
+    if bak_data is None:
+        if cur_state in ("patched", "patched_string"):
+            _write_bak(current, "ВНИМАНИЕ: бэкапа не было, файл уже пропатчен — сохранён текущий (пропатченный); для валидного оригинала переустановите приложение")
+        else:
+            _write_bak(current, "сохранена до-патчная версия")
+    elif bak_data == current:
+        pass  # бэкап уже соответствует текущему файлу
+    elif cur_state in ("unpatched", "unpatched_string"):
+        # не совпадает с бэкапом: новая версия ИЛИ другая подпись того же файла
+        _write_bak(current, "приведён к текущему до-патчному файлу")
+    else:
+        # Текущий пропатчен: проверяем, хранит ли бэкап оригинал ЭТОГО билда.
+        derived, _rev, _notes = revert_patches_inplace(current, gate_obj)
+        if bak_data == derived:
+            pass  # бэкап — точный оригинал текущей версии
+        elif _rev > 0:
+            _write_bak(derived, "заменён на оригинал текущей версии (восстановлен откатом патча; прежний не соответствовал этому билду)")
+        else:
+            # Патч не обратим (гейты без точных orig-байтов) и строк нет.
+            # Валидный непропатченный бэкап того же размера трогать НЕЛЬЗЯ —
+            # это единственный оригинал этой версии (регрессия: раньше
+            # перезаписывался пропатченным файлом и оригинал терялся).
+            bak_state, _ = _binary_status_from_data(bak_data, gate_obj)
+            if bak_state in ("unpatched", "unpatched_string") and len(bak_data) == len(current):
+                log_ok("Бэкап: хранит непропатченный оригинал этой же версии — сохранён.")
+            else:
+                _write_bak(current, "ВНИМАНИЕ: точный оригинал недоступен — сохранён текущий (пропатченный) файл во избежание даунгрейда при откате")
 
     # 3. Поиск гейтов
     applied = 0
@@ -402,52 +460,88 @@ def apply_binary_patch(path, gate_obj, name="Binary", platform=None):
     log_ok(f"{name} успешно пропатчен!")
     return True
 
-def restore_binary(path, name="Binary", platform=None):
-    bak = path + BAK_EXT
-    if not os.path.exists(bak):
-        # Если бэкапа нет, но есть строковый патч — инвертируем строку
-        if os.path.isfile(path):
-            with open(path, "rb") as f:
-                data = bytearray(f.read())
-            out_cnt = data.count(b"inexigible")
-            if out_cnt > 0:
-                data = bytearray(bytes(data).replace(b"inexigible", b"ineligible"))
-                if platform:
-                    platform.atomic_replace_file(path, bytes(data))
-                    platform.post_patch(path)
-                else:
-                    with open(path, "wb") as f:
-                        f.write(data)
-                log_ok(f"Откат выполнен через обратную строковую замену ({out_cnt} вхожд.): {name}")
-                return True
-        log_warn(f"Бэкап {bak} не найден. Нечего восстанавливать.")
+def restore_binary(path, gate_obj, name="Binary", platform=None):
+    if not path or not os.path.isfile(path):
+        log_warn(f"Файл {name} не найден: {path}")
         return False
 
-    if platform:
-        platform.kill_running_processes()
-        platform.prepare_writable(path)
+    bak = path + BAK_EXT
+    bak_data = None
+    if os.path.exists(bak):
+        try:
+            with open(bak, "rb") as f:
+                bak_data = f.read()
+        except Exception as e:
+            log_warn(f"Не удалось прочитать бэкап {bak}: {e}")
 
     try:
-        with open(bak, "rb") as f:
-            bak_data = f.read()
-        try:
-            with open(path, "rb") as f:
-                if f.read() == bak_data:
-                    log_info(f"{name} уже соответствует бэкапу (оригиналу) — откат не требуется.")
-                    return True
-        except Exception:
-            pass
-        if platform:
-            platform.atomic_replace_file(path, bak_data)
-            platform.post_patch(path)
-        else:
-            with open(path, "wb") as f:
-                f.write(bak_data)
-        log_ok(f"{name} успешно восстановлен из {os.path.basename(bak)}!")
-        return True
+        with open(path, "rb") as f:
+            cur = f.read()
     except Exception as e:
-        log_err(f"Ошибка восстановления {name}: {e}")
+        log_err(f"Не удалось прочитать {path}: {e}")
         return False
+
+    st, _ = _binary_status_from_data(cur, gate_obj)
+    if st in ("unpatched", "unpatched_string"):
+        log_info(f"{name} уже в оригинальном (непропатченном) состоянии — откат не требуется.")
+        return True
+
+    def _write_restored(payload: bytes, reason: str) -> bool:
+        if platform:
+            platform.kill_running_processes()
+            platform.prepare_writable(path)
+        try:
+            if platform:
+                # Переподпись обязательна ЛЮБОГО восстановленного содержимого:
+                # откат байтов в __TEXT (и сам факт подмены файла) делает
+                # прежнюю встроенную подпись недействительной, и macOS
+                # убивает бинарник при запуске (killed: 9).
+                platform.atomic_replace_file(path, payload)
+                platform.post_patch(path)
+            else:
+                with open(path, "wb") as f:
+                    f.write(payload)
+        except Exception as e:
+            log_err(f"Ошибка восстановления {name}: {e}")
+            return False
+        log_ok(f"{name}: {reason}")
+        return True
+
+    # Байтово-точный оригинал текущего билда (для CLI-гейтов откат точный).
+    derived, reverted, notes = revert_patches_inplace(cur, gate_obj)
+
+    # 1) Бэкап непропатчен И в точности равен откаченному текущему => это
+    #    оригинал ЭТОЙ версии: восстанавливаем байтово-точно, включая подпись.
+    #    (Проверка статуса бэкапа обязательна: бэкап, равный derived, может
+    #    сам оказаться пропатченным файлом — тогда это не оригинал.)
+    if bak_data is not None and bak_data == derived:
+        bak_d_state, _ = _binary_status_from_data(bak_data, gate_obj)
+        if bak_d_state in ("unpatched", "unpatched_string"):
+            return _write_restored(bak_data, f"восстановлен из {os.path.basename(bak)} (бэкап этой же версии; содержимое байтово-точно, подпись перевыпущена).")
+
+    # 2) Бэкап непропатчен и размер в точности равен текущему — с высокой
+    #    вероятностью тот же билд (патч размер не меняет; переустановки
+    #    подписи на macOS размер меняют, и тогда сработает ветка 3).
+    if bak_data is not None and len(bak_data) == len(cur):
+        bak_state, _ = _binary_status_from_data(bak_data, gate_obj)
+        if bak_state in ("unpatched", "unpatched_string"):
+            return _write_restored(bak_data, f"восстановлен из {os.path.basename(bak)} (бэкап этой же версии).")
+        log_warn(f"Бэкап {os.path.basename(bak)} пропатчен — как оригинал не используется.")
+
+    # 3) Откат патча на месте: версия гарантированно сохраняется.
+    #    Бэкап от другой версии копировать НЕЛЬЗЯ — это даунгрейдит бинарник.
+    if bak_data is not None:
+        log_warn(f"Бэкап {os.path.basename(bak)} от ДРУГОЙ версии — копирование даунгрейдило бы бинарник, бэкап НЕ используется.")
+    if reverted == 0:
+        log_err(f"{name}: патч присутствует, но ни один известный метод отката не применим.")
+        return False
+    for n in notes:
+        log_info(f"  откат: {n}")
+    partial = any("неизвестны" in n for n in notes)
+    reason = f"патч снят на месте, версия сохранена ({reverted} правок откачено)"
+    if partial:
+        reason += "; частично: для полного отката переустановите приложение"
+    return _write_restored(derived, reason)
 
 # =============================================================================
 # 3. СЕТЕВОЙ МОДУЛЬ (DoH HTTP/2, SNI-прокси, Hosts)
