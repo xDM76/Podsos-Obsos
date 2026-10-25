@@ -22,7 +22,7 @@ import json
 import urllib.request
 import subprocess
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 # ANSI Цвета
 C_CYAN = "\033[36m"
