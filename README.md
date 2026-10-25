@@ -1,4 +1,4 @@
-# 🚀 PodsosoObsos — Universal Antigravity & agy CLI Patcher (macOS, Windows & Linux)
+# 🚀 PodsosObsos — Universal Antigravity & agy CLI Patcher (macOS, Windows & Linux)
 
 Универсальный инструмент для разблокировки **Antigravity CLI (`agy`)** и **Antigravity 2.0 (Desktop)** на **macOS** (Apple Silicon arm64 / Intel x64), **Windows** (x64 / arm64) и **Linux** (x64 / aarch64).
 
@@ -11,7 +11,7 @@
 Архитектура разделена на общее ядро в верхней папке и платформо-зависимые адаптеры в своих директориях:
 
 ```text
-PodsosoObsos/
+PodsosObsos/
 ├── Запуск_Mac_PodsosObsos.command # 🍏 Запуск для macOS
 ├── Запуск_WIN_PodsosObsos.bat     # 🪟 Запуск для Windows
 ├── Запуск_Linux_PodsosObsos.sh    # 🐧 Запуск для Linux
@@ -43,7 +43,7 @@ chmod +x Запуск_Linux_PodsosObsos.sh
 ```
 
 ### На Windows:
-Дважды кликните по файлу **`Запуск_WIN_PodsosObsos.bat`** на верхнем уровне папки `PodsosoObsos`.
+Дважды кликните по файлу **`Запуск_WIN_PodsosObsos.bat`** на верхнем уровне папки `PodsosObsos`.
 
 > **💡 Примечание для Windows:** 
 > Скрипт корректно находит бинарники `agy.exe` и `language_server.exe` как при обычном запуске, так и при запуске «От имени Администратора» (сканирует реестр и профили всех пользователей `C:\Users\*`). Если бинарник установлен в нестандартный каталог, скрипт предложит ввести путь вручную, либо его можно передать ключом:
@@ -52,7 +52,7 @@ chmod +x Запуск_Linux_PodsosObsos.sh
 > ```
 
 ### На macOS:
-Дважды кликните по файлу **`Запуск_Mac_PodsosObsos.command`** на верхнем уровне папки `PodsosoObsos`.
+Дважды кликните по файлу **`Запуск_Mac_PodsosObsos.command`** на верхнем уровне папки `PodsosObsos`.
 
 Либо через терминал:
 ```bash
@@ -61,7 +61,7 @@ python3 podsoso_obsos.py
 
 ---
 
-## 🛠 Что делает PodsosoObsos
+## 🛠 Что делает PodsosObsos
 
 ### 1. Бинарный машинный патчинг (Go Binary Gate)
 - Снимает внутреннюю проверку региона аккаунта (`eligibility check`) в машинном коде `agy` и `language_server` (`Antigravity 2.0`).
