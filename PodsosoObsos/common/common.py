@@ -337,7 +337,7 @@ def _binary_status_from_data(data, gate_obj):
         "proxy_var": proxy_status
     }
 
-    # Общий статус совместим со всеми проверками st.startswith("patched")
+    # Общий статус: fully_patched (все компоненты), patched (частично) или unpatched
     if (machine_status == "patched" or string_status in ("patched", "partial")) and proxy_status == "patched":
         return ("fully_patched", details)
     if machine_status == "patched" or string_status in ("patched", "partial") or proxy_status == "patched":
@@ -345,6 +345,14 @@ def _binary_status_from_data(data, gate_obj):
     if machine_status == "unpatched" or string_status == "unpatched" or proxy_status == "unpatched":
         return ("unpatched", details)
     return ("unknown", details)
+
+def is_binary_patched(status_code: str) -> bool:
+    """Проверяет, применён ли патч к бинарнику (полностью или частично)."""
+    if not status_code or not isinstance(status_code, str):
+        return False
+    return status_code in ("fully_patched", "patched", "patched_string", "patched_fully") or (
+        status_code.startswith("patched") and not status_code.startswith("unpatched")
+    )
 
 def get_binary_status(path, gate_obj):
     if not path or not os.path.isfile(path):
@@ -446,7 +454,7 @@ def apply_binary_patch(path, gate_obj, name="Binary", platform=None):
             log_warn(f"Не удалось обновить бэкап {bak}: {e}")
 
     if bak_data is None:
-        if cur_state in ("patched", "patched_string"):
+        if is_binary_patched(cur_state):
             _write_bak(current, "ВНИМАНИЕ: бэкапа не было, файл уже пропатчен — сохранён текущий (пропатченный); для валидного оригинала переустановите приложение")
         else:
             _write_bak(current, "сохранена до-патчная версия")

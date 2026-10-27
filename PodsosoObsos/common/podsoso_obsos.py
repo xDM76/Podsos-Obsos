@@ -57,6 +57,7 @@ from common import (
     CLI_GATE,
     MANAGER_GATE,
     get_binary_status,
+    is_binary_patched,
     apply_binary_patch,
     restore_binary,
     setup_dns_pin,
@@ -106,7 +107,7 @@ HOSTS_FILE = platform.get_hosts_path()
 
 def format_patch_details(status_code: str, details: dict) -> str:
     if not details:
-        if status_code.startswith("patched"):
+        if is_binary_patched(status_code):
             return color("ПРОПАТЧЕН", C_GREEN, C_BOLD)
         return color("НЕ ПРОПАТЧЕН", C_YELLOW, C_BOLD)
 
@@ -131,7 +132,7 @@ def format_patch_details(status_code: str, details: dict) -> str:
         parts.append(color("AG_LS_PROXY: ✖", C_YELLOW))
 
     summary = color("ПОЛНОСТЬЮ ПРОПАТЧЕН", C_GREEN, C_BOLD) if status_code == "fully_patched" else (
-        color("ПРОПАТЧЕН ЧАСТИЧНО", C_YELLOW, C_BOLD) if status_code == "patched" else color("НЕ ПРОПАТЧЕН", C_RED, C_BOLD)
+        color("ПРОПАТЧЕН ЧАСТИЧНО", C_YELLOW, C_BOLD) if is_binary_patched(status_code) else color("НЕ ПРОПАТЧЕН", C_RED, C_BOLD)
     )
     if parts:
         return f"{summary} ({', '.join(parts)})"
@@ -290,8 +291,8 @@ def run_all_first_5_steps():
             status_before, _ = get_binary_status(agy_path, CLI_GATE)
             success = apply_binary_patch(agy_path, CLI_GATE, "agy CLI", platform)
             status_after, _ = get_binary_status(agy_path, CLI_GATE)
-            if success or status_after.startswith("patched"):
-                tag = "уже был пропатчен" if status_before.startswith("patched") else "успешно пропатчен"
+            if success or is_binary_patched(status_after):
+                tag = "уже был пропатчен" if is_binary_patched(status_before) else "успешно пропатчен"
                 results.append({
                     "num": 1,
                     "name": "Патч agy CLI",
@@ -346,8 +347,8 @@ def run_all_first_5_steps():
             status_before, _ = get_binary_status(mgr_path, MANAGER_GATE)
             success = apply_binary_patch(mgr_path, MANAGER_GATE, "Antigravity 2.0", platform)
             status_after, _ = get_binary_status(mgr_path, MANAGER_GATE)
-            if success or status_after.startswith("patched"):
-                tag = "уже был пропатчен" if status_before.startswith("patched") else "успешно пропатчен"
+            if success or is_binary_patched(status_after):
+                tag = "уже был пропатчен" if is_binary_patched(status_before) else "успешно пропатчен"
                 results.append({
                     "num": 2,
                     "name": "Патч Antigravity 2.0",
@@ -736,15 +737,19 @@ def main_menu():
 
         if not agy_path or st_agy == "not_found":
             agy_st = color("✖ не найден", C_RED)
-        elif st_agy.startswith("patched"):
+        elif st_agy == "fully_patched":
             agy_st = color("✔ пропатчен", C_GREEN)
+        elif is_binary_patched(st_agy):
+            agy_st = color("✔ пропатчен (частично)", C_YELLOW)
         else:
             agy_st = color("✖ не пропатчен", C_YELLOW)
 
         if not mgr_path or st_mgr == "not_found":
             mgr_st = color("✖ не найден", C_RED)
-        elif st_mgr.startswith("patched"):
+        elif st_mgr == "fully_patched":
             mgr_st = color("✔ пропатчен", C_GREEN)
+        elif is_binary_patched(st_mgr):
+            mgr_st = color("✔ пропатчен (частично)", C_YELLOW)
         else:
             mgr_st = color("✖ не пропатчен", C_YELLOW)
 
