@@ -31,7 +31,7 @@ common_dir = os.path.join(parent_dir, "common")
 if common_dir not in sys.path:
     sys.path.insert(0, common_dir)
 
-from common import BasePlatform, CLOUD_CODE_URL_CANONICAL, log_ok, log_warn, log_err, log_info
+from common import BasePlatform, CLOUD_CODE_URL_CANONICAL, AG_LS_PROXY_CANONICAL, log_ok, log_warn, log_err, log_info
 
 class WinPlatform(BasePlatform):
     name = "Windows"
@@ -595,6 +595,92 @@ class WinPlatform(BasePlatform):
                 conflicts.append(("HKCU\\Environment", hkcu_val))
         if os.environ.get("CLOUD_CODE_URL"):
             effective, source = os.environ["CLOUD_CODE_URL"], "текущая сессия"
+        return effective, source, conflicts
+
+    def setup_proxy_env(self, proxy_url: str = AG_LS_PROXY_CANONICAL) -> bool:
+        """
+        Сохраняет AG_LS_PROXY в среде Windows:
+        1. В текущем процессе (os.environ)
+        2. В реестре пользователя (HKCU\\Environment)
+        3. Через setx для новых терминалов
+        """
+        success = False
+        os.environ["AG_LS_PROXY"] = proxy_url
+
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "AG_LS_PROXY", 0, winreg.REG_SZ, proxy_url)
+            success = True
+        except Exception:
+            pass
+
+        try:
+            res = subprocess.run(["setx", "AG_LS_PROXY", proxy_url], check=False, capture_output=True, text=True)
+            if res.returncode == 0:
+                success = True
+        except Exception:
+            pass
+
+        if success:
+            log_ok(f"AG_LS_PROXY={proxy_url} сохранён в профиле Windows (User Environment)!")
+            return True
+        else:
+            log_warn("Не удалось записать AG_LS_PROXY в реестр Windows.")
+            return False
+
+    def clean_proxy_env(self):
+        """Удаляет переменную AG_LS_PROXY из реестра пользователя и окружения."""
+        try:
+            if "AG_LS_PROXY" in os.environ:
+                del os.environ["AG_LS_PROXY"]
+        except Exception:
+            pass
+
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_SET_VALUE) as key:
+                winreg.DeleteValue(key, "AG_LS_PROXY")
+            log_ok("AG_LS_PROXY удалена из реестра Windows.")
+            return ["HKCU\\Environment"], 1
+        except Exception:
+            return [], 0
+
+    def is_proxy_env_set(self) -> bool:
+        effective, _source, _conflicts = self.get_proxy_env_state()
+        return bool(effective)
+
+    def get_proxy_env_state(self):
+        conflicts = []
+        effective, source = "", "не найдено"
+        hkcu_val, hklm_val = "", ""
+        try:
+            import winreg
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ) as key:
+                    hkcu_val, _ = winreg.QueryValueEx(key, "AG_LS_PROXY")
+            except OSError:
+                pass
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                    r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+                                    0, winreg.KEY_READ) as key:
+                    hklm_val, _ = winreg.QueryValueEx(key, "AG_LS_PROXY")
+            except OSError:
+                pass
+        except Exception:
+            pass
+
+        if hklm_val:
+            effective, source = hklm_val, "HKLM (системная)"
+            if hklm_val != AG_LS_PROXY_CANONICAL:
+                conflicts.append(("HKLM (системная)", hklm_val))
+        if hkcu_val:
+            effective, source = hkcu_val, "HKCU\\Environment"
+            if hkcu_val != AG_LS_PROXY_CANONICAL:
+                conflicts.append(("HKCU\\Environment", hkcu_val))
+        if os.environ.get("AG_LS_PROXY"):
+            effective, source = os.environ["AG_LS_PROXY"], "текущая сессия"
         return effective, source, conflicts
 
     def query_udp_dns(self, domain: str, server_ip: str) -> list:
