@@ -31,7 +31,7 @@ common_dir = os.path.join(parent_dir, "common")
 if common_dir not in sys.path:
     sys.path.insert(0, common_dir)
 
-from common import BasePlatform, CLOUD_CODE_URL_CANONICAL, log_ok, log_warn, log_err, log_info
+from common import BasePlatform, CLOUD_CODE_URL_CANONICAL, AG_LS_PROXY_CANONICAL, log_ok, log_warn, log_err, log_info
 
 class MacPlatform(BasePlatform):
     name = "macOS"
@@ -287,6 +287,83 @@ class MacPlatform(BasePlatform):
                 pass
         if os.environ.get("CLOUD_CODE_URL"):
             effective, source = os.environ["CLOUD_CODE_URL"], "текущая сессия"
+        return effective, source, conflicts
+
+    _PROXY_LINE_RE = re.compile(r"^[ \t]*(?:export[ \t]+)?AG_LS_PROXY=.*$", re.M)
+
+    def clean_proxy_env(self):
+        """Удаляет ВСЕ старые строки AG_LS_PROXY из профилей."""
+        cleaned, removed = [], 0
+        for fn in self.ENV_FILES:
+            p = os.path.expanduser(fn)
+            if not os.path.isfile(p):
+                continue
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                n = len(self._PROXY_LINE_RE.findall(content))
+                if n:
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write(self._PROXY_LINE_RE.sub("", content))
+                    cleaned.append(os.path.basename(p))
+                    removed += n
+            except Exception:
+                pass
+        return cleaned, removed
+
+    def setup_proxy_env(self, proxy_url: str = AG_LS_PROXY_CANONICAL) -> bool:
+        cleaned, removed = self.clean_proxy_env()
+        if removed:
+            log_ok(f"Удалено старых строк AG_LS_PROXY: {removed} ({', '.join(cleaned)})")
+
+        zshrc = os.path.expanduser("~/.zshrc")
+        line_to_add = f'export AG_LS_PROXY="{proxy_url}"'
+        try:
+            content = ""
+            if os.path.exists(zshrc):
+                with open(zshrc, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+
+            if line_to_add not in content:
+                with open(zshrc, "a", encoding="utf-8") as f:
+                    f.write(f"\n# Antigravity isolated proxy without VPN\n{line_to_add}\n")
+                log_ok(f"Добавлен AG_LS_PROXY={proxy_url} в ~/.zshrc")
+            else:
+                log_ok("AG_LS_PROXY уже прописан корректно в ~/.zshrc")
+
+            os.environ["AG_LS_PROXY"] = proxy_url
+            return True
+        except Exception as e:
+            log_warn(f"Не удалось обновить ~/.zshrc: {e}")
+            return False
+
+    def is_proxy_env_set(self) -> bool:
+        effective, _source, _conflicts = self.get_proxy_env_state()
+        return bool(effective)
+
+    def get_proxy_env_state(self):
+        conflicts = []
+        effective, source = "", "не найдено"
+        for fn in self.ENV_FILES:
+            p = os.path.expanduser(fn)
+            if not os.path.isfile(p):
+                continue
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    for i, line in enumerate(f, 1):
+                        s = line.strip()
+                        if s.startswith("#") or "AG_LS_PROXY=" not in s:
+                            continue
+                        s = s.replace("export", "", 1).strip()
+                        url = s.split("=", 1)[1].strip().strip('"').strip("'")
+                        tag = f"~/{os.path.basename(p)}:{i}"
+                        effective, source = url, tag
+                        if url != AG_LS_PROXY_CANONICAL:
+                            conflicts.append((tag, url))
+            except Exception:
+                pass
+        if os.environ.get("AG_LS_PROXY"):
+            effective, source = os.environ["AG_LS_PROXY"], "текущая сессия"
         return effective, source, conflicts
 
     def query_udp_dns(self, domain: str, server_ip: str) -> list:

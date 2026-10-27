@@ -22,7 +22,11 @@ import json
 import urllib.request
 import subprocess
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
+
+# Константы для изолированного прокси-канала agy / language_server (референс: confeden/Antigravity)
+AG_LS_PROXY_DEFAULT_PORT = 53129
+AG_LS_PROXY_CANONICAL = f"http://127.0.0.1:{AG_LS_PROXY_DEFAULT_PORT}"
 
 # ANSI Цвета
 C_CYAN = "\033[36m"
@@ -131,6 +135,19 @@ class BasePlatform:
         Переопределяется платформами; дефолт смотрит только на текущую сессию."""
         val = os.environ.get("CLOUD_CODE_URL", "")
         return (val, "текущая сессия" if val else "не найдено", [])
+
+    def setup_proxy_env(self, proxy_url: str = AG_LS_PROXY_CANONICAL) -> bool:
+        raise NotImplementedError
+
+    def is_proxy_env_set(self) -> bool:
+        raise NotImplementedError
+
+    def get_proxy_env_state(self):
+        val = os.environ.get("AG_LS_PROXY", "")
+        return (val, "текущая сессия" if val else "не найдено", [])
+
+    def clean_proxy_env(self):
+        raise NotImplementedError
 
     def query_udp_dns(self, domain: str, server_ip: str) -> list:
         raise NotImplementedError
@@ -277,24 +294,57 @@ BAK_EXT = ".agybak"
 
 def _binary_status_from_data(data, gate_obj):
     """Статус патча по содержимому в памяти (без чтения файла)."""
+    states = []
+    machine_status = "unknown"
     try:
-        states = []
         for state, _offsets, concrete_g in gate_obj.resolve_all(data):
             states.append((state, concrete_g))
         if all(s[0] == "patched" for s in states):
-            return ("patched", states)
-        if any(s[0] == "unpatched" for s in states):
-            return ("unpatched", states)
-        return ("unknown", None)
+            machine_status = "patched"
+        elif any(s[0] == "unpatched" for s in states):
+            machine_status = "unpatched"
     except LookupError:
-        # Проверяем строковый патч
-        if b"inexigible" in data and b"ineligible" not in data:
-            return ("patched_string", None)
-        if b"ineligible" in data:
-            return ("unpatched_string", None)
-        return ("unknown", None)
+        machine_status = "not_found"
     except Exception:
-        return ("error", None)
+        machine_status = "error"
+
+    string_patched = (b"inexigible" in data and b"ineligible" not in data)
+    string_unpatched = (b"ineligible" in data)
+    string_partial = (b"inexigible" in data and b"ineligible" in data)
+    if string_patched:
+        string_status = "patched"
+    elif string_partial:
+        string_status = "partial"
+    elif string_unpatched:
+        string_status = "unpatched"
+    else:
+        string_status = "not_found"
+
+    proxy_patched = (b"AG_LS_PROXY" in data and b"https_proxy" not in data)
+    proxy_partial = (b"AG_LS_PROXY" in data and b"https_proxy" in data)
+    proxy_unpatched = (b"https_proxy" in data)
+    if proxy_patched or proxy_partial:
+        proxy_status = "patched"
+    elif proxy_unpatched:
+        proxy_status = "unpatched"
+    else:
+        proxy_status = "not_found"
+
+    details = {
+        "machine": machine_status,
+        "machine_states": states,
+        "string": string_status,
+        "proxy_var": proxy_status
+    }
+
+    # Общий статус совместим со всеми проверками st.startswith("patched")
+    if (machine_status == "patched" or string_status in ("patched", "partial")) and proxy_status == "patched":
+        return ("fully_patched", details)
+    if machine_status == "patched" or string_status in ("patched", "partial") or proxy_status == "patched":
+        return ("patched", details)
+    if machine_status == "unpatched" or string_status == "unpatched" or proxy_status == "unpatched":
+        return ("unpatched", details)
+    return ("unknown", details)
 
 def get_binary_status(path, gate_obj):
     if not path or not os.path.isfile(path):
@@ -313,18 +363,34 @@ def _iter_gates(gate_obj):
 
 def revert_patches_inplace(data, gate_obj):
     """Откат патчей прямо в данных (версия бинарника гарантированно сохраняется):
-    1) строковый патч: inexigible -> ineligible (всегда обратим);
-    2) машинные гейты с известным orig: fix-байты -> оригинальные (байтово-точно).
-    Гейты без orig (wildcard-байты в зоне fix) откатить точно невозможно — фиксируется в notes.
-    Возвращает (новые_данные, число_откаченных_правок, список_пояснений)."""
+    1) строковый патч прокси: AG_LS_PROXY -> https_proxy;
+    2) строковый патч регионов: inexigible -> ineligible;
+    3) машинные гейты с известным orig: fix-байты -> оригинальные (байтово-точно)."""
     out = bytearray(data)
     reverted = 0
     notes = []
+
+    # 1. Снятие патча переменной прокси (AG_LS_PROXY -> https_proxy)
+    proxy_cnt = out.count(b"AG_LS_PROXY")
+    if proxy_cnt:
+        out = bytearray(bytes(out).replace(b"AG_LS_PROXY", b"https_proxy"))
+        reverted += proxy_cnt
+        notes.append(f"строковый патч прокси снят: AG_LS_PROXY -> https_proxy ({proxy_cnt} вхожд.)")
+
+    # 2. Снятие строкового патча региона
+    in_tiers = out.count(b"inexigible_tiers")
+    if in_tiers:
+        out = bytearray(bytes(out).replace(b"inexigible_tiers", b"ineligible_tiers"))
+        reverted += in_tiers
+        notes.append(f"строковый патч снят: inexigible_tiers -> ineligible_tiers ({in_tiers} вхожд.)")
+
     in_cnt = out.count(b"inexigible")
     if in_cnt:
         out = bytearray(bytes(out).replace(b"inexigible", b"ineligible"))
         reverted += in_cnt
         notes.append(f"строковый патч снят: inexigible -> ineligible ({in_cnt} вхожд.)")
+
+    # 3. Машинные гейты
     for g in _iter_gates(gate_obj):
         if not g.orig:
             if g.patched.search(bytes(out)):
@@ -407,38 +473,58 @@ def apply_binary_patch(path, gate_obj, name="Binary", platform=None):
             else:
                 _write_bak(current, "ВНИМАНИЕ: точный оригинал недоступен — сохранён текущий (пропатченный) файл во избежание даунгрейда при откате")
 
-    # 3. Поиск гейтов
+    # 3. Применение патчей (Машинный гейт + Строковый гейт + Прокси-переменная)
     applied = 0
     already = 0
+
+    # 3.1. Машинные сигнатуры гейта (Go machine code)
     try:
         matches = gate_obj.resolve_all(bytes(data))
         for kind, offsets, g in matches:
             for off in offsets:
                 if kind == "patched":
                     already += 1
-                    log_step(f"Гейт уже пропатчен: {g.desc} @ 0x{off:x}", True, "изменений не требуется")
+                    log_step(f"Машинный гейт уже пропатчен: {g.desc} @ 0x{off:x}", True, "изменений не требуется")
                     continue
                 data[off:off + len(g.fix)] = g.fix
                 applied += 1
-                log_step(f"Гейт: {g.desc} @ 0x{off:x}", True)
+                log_step(f"Машинный гейт: {g.desc} @ 0x{off:x}", True)
     except LookupError:
-        # Резервный строковый патч
-        in_cnt = data.count(b"ineligible")
-        if in_cnt > 0:
-            data = bytearray(bytes(data).replace(b"ineligible", b"inexigible"))
-            applied = in_cnt
-            log_step(f"Строковый патч: ineligible -> inexigible ({in_cnt} вхожд.)", True)
-        else:
-            if b"inexigible" in data:
-                log_step("Бинарник уже пропатчен (строка inexigible найдена)", True)
-                already = 1
-            else:
-                log_err("Не найдена ни машинная сигнатура, ни строка ineligible.")
-                return False
+        pass
+
+    # 3.2. Строковый гейт (ineligible -> inexigible и ineligible_tiers -> inexigible_tiers)
+    # Снимает блокировку в Protobuf дескрипторах и Go struct tags (confeden/Antigravity)
+    in_cnt = data.count(b"ineligible")
+    if in_cnt > 0:
+        data = bytearray(bytes(data).replace(b"ineligible", b"inexigible"))
+        applied += in_cnt
+        log_step(f"Строковый гейт: ineligible -> inexigible ({in_cnt} вхожд.)", True)
+    elif b"inexigible" in data:
+        already += 1
+        log_step("Строковый гейт: ineligible уже пропатчен (inexigible)", True, "изменений не требуется")
+
+    in_tiers_cnt = data.count(b"ineligible_tiers")
+    if in_tiers_cnt > 0:
+        data = bytearray(bytes(data).replace(b"ineligible_tiers", b"inexigible_tiers"))
+        applied += in_tiers_cnt
+        log_step(f"Строковый гейт: ineligible_tiers -> inexigible_tiers ({in_tiers_cnt} вхожд.)", True)
+    elif b"inexigible_tiers" in data:
+        already += 1
+
+    # 3.3. Прокси-канал: переименование https_proxy -> AG_LS_PROXY (confeden/Antigravity)
+    # Позволяет направить agy и language_server в локальный прокси без ломки системного HTTPS_PROXY
+    proxy_cnt = data.count(b"https_proxy")
+    if proxy_cnt > 0:
+        data = bytearray(bytes(data).replace(b"https_proxy", b"AG_LS_PROXY"))
+        applied += proxy_cnt
+        log_step(f"Прокси-канал: https_proxy -> AG_LS_PROXY ({proxy_cnt} вхожд.)", True)
+    elif b"AG_LS_PROXY" in data:
+        already += 1
+        log_step("Прокси-канал: AG_LS_PROXY уже активирован в бинарнике", True, "изменений не требуется")
 
     if applied == 0:
         if already > 0:
-            log_ok(f"{name} уже был пропатчен ранее — перезапись не требуется.")
+            log_ok(f"{name} уже был полностью пропатчен ранее — перезапись не требуется.")
             return True
         log_warn("Патч уже применён или совпадений не обнаружено.")
 
